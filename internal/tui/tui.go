@@ -169,7 +169,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.output.GotoBottom()
 			}
 			return m, nil
-		case "g":
+		case "g", "home":
 			m.output.GotoTop()
 			m.stickBottom = false
 			return m, nil
@@ -187,7 +187,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// toggle stickBottom). This avoids the previous behavior where
 		// arrow keys were sent to both panes simultaneously.
 		switch msg.String() {
-		case "up", "down", "k", "j", "home":
+		case "up", "down", "k", "j":
 			prev := m.list.Index()
 			m.list, cmd = m.list.Update(msg)
 			cmds = append(cmds, cmd)
