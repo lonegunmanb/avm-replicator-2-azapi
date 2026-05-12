@@ -49,7 +49,7 @@ Build `locals` in Replicator Module (`migrate_*` files) for `azapi_resource` bod
 - Remove any content that belongs to other tasks immediately.
 **Files:** All generated code must be put in `migrate_xxx.tf` files in the **root folder**: `migrate_main.tf`, `migrate_variables.tf`, `migrate_outputs.tf`, `migrate_validation.tf` (edit these). Root folder also has: `main.tf` (NO modify), `variables.tf` (modify when documented: default/ephemeral/validation/etc.), `track.md`.
 
-**Workflow:** After completing a task, update its status in `track.md` to `Pending for check`. The coordinator will then delegate verification to a checker agent.
+**Workflow:** After completing a task, update its status in `track.md` to `Pending for check`, then **exit**. Do **not** call `copilot -p ...` to spawn a Checker — the Go orchestrator (`cmd/avm2azapi`, module `github.com/lonegunmanb/avm2azapi`) watches `track.md` and will launch the Checker session for you via the `github.com/github/copilot-sdk/go` SDK. Recursive sub-Executor delegation for nested blocks is similarly handled by the Go orchestrator: just create the skeleton, list the child task numbers in your proof document, set the status, and exit.
 
 ## Schema Investigation
 **MANDATORY:** Query complete resource function FIRST to get `CustomizeDiff` (critical for ForceNew):

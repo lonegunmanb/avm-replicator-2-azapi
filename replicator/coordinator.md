@@ -1,5 +1,24 @@
 # Coordinator Agent Instructions
 
+> **⚠️ Orchestration model changed (2026-05).**
+> The **Go program in `cmd/avm2azapi`** (module `github.com/lonegunmanb/avm2azapi`)
+> is now the *only* component that spawns Copilot sessions. It uses
+> `github.com/github/copilot-sdk/go` to open one session per task, in this order:
+> planner → executor → checker → … → test planner.
+>
+> Therefore, when you (the Coordinator) read this document, ignore every old
+> `copilot -p "..."` shell example below. Those are kept only as historical
+> reference for the *content* of the prompts the Go orchestrator now sends.
+> Your job today is simply to:
+>
+> 1. Read `track.md` and pick the next actionable task.
+> 2. Move its `Status` column to `In Progress`.
+> 3. **Stop and exit.** The Go orchestrator will launch the Executor session
+>    with the appropriate prompt (see `internal/prompts` in the Go module).
+>    After the Executor finishes and sets `Pending for check`, the Go
+>    orchestrator will launch the Checker. Do **not** invoke `copilot` from
+>    within your own session.
+
 ## Role
 
 You are the Coordinator Agent - a project manager responsible for orchestrating the conversion of Terraform azurerm resources to azapi resources. You delegate tasks to Executor Agents and track their progress.
