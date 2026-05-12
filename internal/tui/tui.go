@@ -94,8 +94,11 @@ type Model struct {
 
 	width, height int
 	stage         string
+	resourceType  string
 	done          bool
 	err           error
+	tokens        orchestrator.TokenStats
+	progress      orchestrator.Progress
 
 	list   list.Model
 	output viewport.Model
@@ -228,9 +231,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) applyUpdate(u orchestrator.Update) {
 	m.jobs = u.Snapshot
 	m.stage = u.Stage
+	if u.ResourceType != "" {
+		m.resourceType = u.ResourceType
+	}
 	m.done = u.Done
 	m.err = u.Err
 	m.activeID = u.Active
+	m.tokens = u.Tokens
+	m.progress = u.Progress
 
 	items := make([]list.Item, len(m.jobs))
 	for i, j := range m.jobs {
@@ -275,8 +283,9 @@ func (m *Model) refreshOutputPane() {
 }
 
 func (m *Model) relayout() {
-	header, footer := 2, 2
-	body := m.height - header - footer
+	// header now occupies 2 lines (title + status), progress 1, footer 1.
+	header, progress, footer := 3, 1, 1
+	body := m.height - header - progress - footer
 	if body < 4 {
 		body = 4
 	}
@@ -295,12 +304,24 @@ func (m *Model) relayout() {
 
 // View implements tea.Model.
 func (m Model) View() string {
-	header := headerStyle.Render(m.headerText())
+	header := headerStyle.Render(m.titleText())
+	status := subHeaderStyle.Render(m.headerText())
 	left := paneStyle.Render(m.list.View())
 	right := paneStyle.Render(m.output.View())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+	progress := progressStyle.Render(m.progressBarText())
 	footer := helpStyle.Render(m.footerText())
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, status, body, progress, footer)
+}
+
+// titleText is rendered on the very top line and shows the resource type
+// currently being migrated, so the user always sees what they are working on.
+func (m Model) titleText() string {
+	rt := m.resourceType
+	if rt == "" {
+		rt = "(no resource specified)"
+	}
+	return "avm2azapi  —  migrating  " + rt
 }
 
 func (m Model) headerText() string {
@@ -332,8 +353,15 @@ func (m Model) headerText() string {
 		// lines are arriving.
 		suffix = fmt.Sprintf("  ▶ %s (%s)", active.Job.ID, formatElapsed(m.now.Sub(active.Started)))
 	}
-	return fmt.Sprintf("avm2azapi   stage=%s   %d/%d done   %d running   %d failed%s",
-		stage, done, total, running, fail, suffix)
+	tokens := ""
+	if m.tokens.Calls > 0 {
+		tokens = fmt.Sprintf("   tok=%s in + %s out (cache r/w %s/%s, %d calls)",
+			formatTokens(m.tokens.Input), formatTokens(m.tokens.Output),
+			formatTokens(m.tokens.CacheRead), formatTokens(m.tokens.CacheWrite),
+			m.tokens.Calls)
+	}
+	return fmt.Sprintf("stage=%s   %d/%d done   %d running   %d failed%s%s",
+		stage, done, total, running, fail, tokens, suffix)
 }
 
 // activeJobView returns a pointer to the currently-active running job, if any.
@@ -359,6 +387,56 @@ func (m Model) footerText() string {
 		stick = "on"
 	}
 	return fmt.Sprintf("↑/↓ select  pgup/pgdn scroll  g/G top/bottom  f follow=%s/stick=%s  q quit", follow, stick)
+}
+
+// progressBarText renders a horizontal bar for whichever phase the
+// orchestrator is currently in. Falls back to a hint line otherwise.
+func (m Model) progressBarText() string {
+	// Bar width is derived from the terminal width; leave room for the
+	// label, percentage, and surrounding padding/brackets.
+	barWidth := m.width - 40
+	if barWidth < 10 {
+		barWidth = 10
+	}
+
+	switch m.stage {
+	case "tasks":
+		return renderBar("convert", m.progress.TasksDone, m.progress.TasksTotal, barWidth)
+	case "extract_tests", "dedup_tests", "run_tests":
+		// Tests phase only has well-defined totals during run_tests; show
+		// what we have, otherwise a placeholder.
+		if m.progress.TestsTotal > 0 {
+			return renderBar("tests", m.progress.TestsDone, m.progress.TestsTotal, barWidth)
+		}
+		fallthrough
+	default:
+		// Show whichever totals are known, preferring the most recent phase.
+		if m.progress.TestsTotal > 0 {
+			return renderBar("tests", m.progress.TestsDone, m.progress.TestsTotal, barWidth)
+		}
+		if m.progress.TasksTotal > 0 {
+			return renderBar("convert", m.progress.TasksDone, m.progress.TasksTotal, barWidth)
+		}
+		return "progress: (waiting for stage to start)"
+	}
+}
+
+// renderBar produces "<label> [#####.....]  done/total  (NN%)".
+func renderBar(label string, done, total, width int) string {
+	if total <= 0 {
+		return fmt.Sprintf("%-7s [%s]   0/0   (--%%)", label, strings.Repeat("·", width))
+	}
+	if done > total {
+		done = total
+	}
+	frac := float64(done) / float64(total)
+	filled := int(frac*float64(width) + 0.5)
+	if filled > width {
+		filled = width
+	}
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	return fmt.Sprintf("%-7s [%s]   %d/%d   (%d%%)",
+		label, bar, done, total, int(frac*100+0.5))
 }
 
 func renderOutput(view orchestrator.JobView, now time.Time) string {
@@ -411,6 +489,19 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
+// formatTokens renders a token count compactly so the header line stays short
+// even when totals reach into the millions: 942 / 12.3k / 4.56M.
+func formatTokens(n int64) string {
+	switch {
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 1_000_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	default:
+		return fmt.Sprintf("%.2fM", float64(n)/1_000_000)
+	}
+}
+
 // styles ---------------------------------------------------------------------
 
 var (
@@ -419,6 +510,16 @@ var (
 		Padding(0, 1).
 		Foreground(lipgloss.Color("15")).
 		Background(lipgloss.Color("63"))
+
+	subHeaderStyle = lipgloss.NewStyle().
+		Padding(0, 1).
+		Foreground(lipgloss.Color("15")).
+		Background(lipgloss.Color("60"))
+
+	progressStyle = lipgloss.NewStyle().
+		Padding(0, 1).
+		Foreground(lipgloss.Color("15")).
+		Background(lipgloss.Color("236"))
 
 	paneStyle = lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).

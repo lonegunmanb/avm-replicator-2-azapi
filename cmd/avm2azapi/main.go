@@ -26,12 +26,9 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -41,13 +38,34 @@ import (
 )
 
 func main() {
+	// Subcommand dispatch — must happen before flag.Parse() so that subcommand
+	// flags are not mistakenly consumed by the top-level FlagSet.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "extract-tests":
+			cmdExtractTests(os.Args[2:])
+			return
+		case "dedup-tests":
+			cmdDedupTests(os.Args[2:])
+			return
+		case "run-tests":
+			cmdRunTests(os.Args[2:])
+			return
+		case "cleanup-rgs":
+			cmdCleanupRGs(os.Args[2:])
+			return
+		}
+	}
+
 	var (
 		resource     = flag.String("resource", "", "AzureRM resource type to migrate (required unless -skip-planning)")
 		workDir      = flag.String("dir", ".", "working directory (must contain track.md once planning is done)")
 		dryRun       = flag.Bool("dry-run", false, "use the in-process simulator instead of the real Copilot SDK")
 		maxTasks     = flag.Int("max-tasks", 0, "cap how many track.md tasks to process (0 = no cap)")
+		skipNewres   = flag.Bool("skip-newres", false, "skip the initial `newres` scaffolding stage")
 		skipPlanning = flag.Bool("skip-planning", false, "skip the planner stage")
-		skipTests    = flag.Bool("skip-tests", false, "skip the acceptance-test prep stage")
+		skipTests    = flag.Bool("skip-tests", false, "skip ALL test stages (prepare/extract/dedup/run/final_check)")
+		accTestDir   = flag.String("acc-test-dir", "azurermacctest", "directory holding generated acceptance tests")
 		model        = flag.String("model", "claude-sonnet-4.5", "Copilot model name")
 		noTUI        = flag.Bool("no-tui", false, "stream events to stdout instead of starting the TUI")
 	)
@@ -58,6 +76,8 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
+
+	prepareWorkDir(*workDir)
 
 	var backend runner.Backend
 	if *dryRun {
@@ -72,14 +92,16 @@ func main() {
 		WorkDir:      *workDir,
 		Backend:      backend,
 		MaxTasks:     *maxTasks,
+		SkipNewres:   *skipNewres,
 		SkipPlanning: *skipPlanning,
 		SkipTests:    *skipTests,
+		AccTestDir:   *accTestDir,
 	})
 	if err != nil {
 		fatal(err)
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := signalContext()
 	defer cancel()
 
 	updates := orch.Subscribe()
@@ -116,7 +138,4 @@ func runHeadless(updates <-chan orchestrator.Update, done <-chan error) {
 	}
 }
 
-func fatal(err error) {
-	fmt.Fprintln(os.Stderr, "fatal:", err)
-	os.Exit(1)
-}
+

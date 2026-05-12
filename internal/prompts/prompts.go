@@ -116,3 +116,27 @@ func PrepareTests(resourceType string) string {
 		resourceType,
 	)
 }
+
+// ExtractTestCase prompts the test-case extraction agent for a single case.
+// It mirrors the prompt that test_extractor.ps1 used to pass to `copilot -p`.
+func ExtractTestCase(caseName string) string {
+	return fmt.Sprintf(
+		"You are a Test Case Agent. Read 'expand_acc_test.md' and follow ALL "+
+			"instructions sequentially: First complete Part 1 (extract test case) "+
+			"then immediately complete Part 2 (convert to AzAPI module). "+
+			"Extract and convert test case method '%s' from the provider test file. "+
+			"The method_name is: %s. When done, exit.",
+		caseName, caseName,
+	)
+}
+
+// RunAccTest prompts the acceptance-test runner agent for a single test case.
+// It mirrors the prompt that run-all-acctests.ps1 used to pass to `copilot`.
+func RunAccTest(caseName string) string {
+	return fmt.Sprintf(
+		"Read `terraform-test.md` and play as a tester role. "+
+			"You're running in non-interactive mode now, do not ask for instruction. "+
+			"Your given task is `azurermacctest/%s`. When done, exit.",
+		caseName,
+	)
+}

@@ -6,7 +6,7 @@ require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/github/copilot-sdk/go v1.0.0-beta.3
+	github.com/github/copilot-sdk/go v0.3.0
 )
 
 require (

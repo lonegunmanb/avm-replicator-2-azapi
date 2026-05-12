@@ -16,12 +16,18 @@ When migrating from `azurerm_*` resources to `azapi_resource`, users lose all th
 
 ## Prerequisites
 
-- **PowerShell Core** (pwsh) installed
-- **GitHub Copilot CLI** (`copilot`) with access to Claude Sonnet 4.5
-- **newres** - A tool for generating initial AzAPI resource scaffolding
+- **Go 1.24+** (only required to build the binary; release binaries are self-contained)
+- **GitHub Copilot CLI** (`copilot`) installed and authenticated, with access to Claude Sonnet 4.5
+- **newres** — a tool for generating initial AzAPI resource scaffolding (skip with `-skip-newres` if not installed)
 - **Terraform** installed and configured
+- **Azure CLI** (`az`) authenticated, for acceptance tests and resource-group cleanup
 - **Azure subscription** for running acceptance tests
 - An **AVM (Azure Verified Modules) template** as the target module
+
+> The Go binary embeds every `.md` prompt file. You no longer need to copy
+> `replicator/` manually — on every run `avm2azapi` writes the embedded
+> prompts into the working directory (replacing any stale `replicator/`
+> subdirectory if present).
 
 ### Required MCP Tools
 
@@ -66,83 +72,120 @@ For Windows users, please read this [note](https://github.com/lonegunmanb/azure-
 
 ## Quick Start
 
-### Step 1: Prepare Your Target AVM Module
-
-Start with a clean AVM module template. Remove all default resource code blocks, keeping only `main.telemetry.tf`.
-
-### Step 2: Copy Replicator Files
-
-Copy all files from the `replicator/` folder into your AVM module's root directory:
+### Step 1: Install the binary
 
 ```bash
-cp -r /path/to/avm-replicator-2-azapi/replicator/* /path/to/your-avm-module/
+go install github.com/lonegunmanb/avm2azapi/cmd/avm2azapi@latest
 ```
 
-### Step 3: Run the Migration
+### Step 2: Prepare your target AVM module
 
-Execute the migration script with your target AzureRM resource type:
+Start with a clean AVM module template. Remove all default resource code
+blocks, keeping only `main.telemetry.tf`.
+
+### Step 3: Run the migration
+
+Point `avm2azapi` at the module directory and the AzureRM resource type:
 
 ```bash
-./migrate.ps1 -ResourceType "azurerm_virtual_network"
+avm2azapi -resource azurerm_virtual_network -dir /path/to/your-avm-module
 ```
 
-Or simply:
+A Bubble Tea TUI opens with:
 
-```bash
-./migrate.ps1 azurerm_orchestrated_virtual_machine_scale_set
-```
+- top line: the resource being migrated
+- status line: current stage, job counts, token usage
+- left pane: every job (Executor / Checker / local steps), with live state
+- right pane: streamed output of the selected job
+- bottom progress bar: `convert N/total` during the conversion phase, then
+  `tests N/total` during acceptance tests
+
+Useful flags:
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `-resource`        | required | AzureRM resource type to migrate |
+| `-dir`             | `.`      | working directory |
+| `-model`           | `claude-sonnet-4.5` | Copilot model |
+| `-max-tasks`       | `0`      | cap how many `track.md` rows to process (0 = no cap) |
+| `-skip-newres`     | `false`  | skip the initial `newres` scaffolding stage |
+| `-skip-planning`   | `false`  | skip the planner stage (track.md already exists) |
+| `-skip-tests`      | `false`  | skip ALL test stages |
+| `-acc-test-dir`    | `azurermacctest` | directory for generated acceptance tests |
+| `-no-tui`          | `false`  | stream events to stdout instead of starting the TUI |
+| `-dry-run`         | `false`  | use the in-process simulator instead of the real Copilot SDK |
 
 ## Migration Pipeline Stages
 
-The `migrate.ps1` script orchestrates the following checkpointed stages:
+`avm2azapi` orchestrates the same checkpointed pipeline that the legacy
+`migrate.ps1` used to run. Each stage's completion is recorded in
+`.migrate-checkpoint.json` so a re-run resumes from where the previous run
+failed.
 
 | Stage | Description |
 |-------|-------------|
-| **1. newres** | Generates initial AzAPI resource scaffolding using the `newres` tool |
-| **2. planning** | AI agent reads `plan.md` to analyze the resource schema and create `track.md` |
-| **3. coordinator** | Runs `run-coordinator.ps1` to delegate tasks to executor agents |
-| **4. validation** | Checks that all tasks in `track.md` are marked ✅ Completed |
-| **5. final-check** | Runs `final-check.ps1` for implementation verification |
-| **6. delete_main** | Removes the original `main.tf` (AzureRM resource definitions) |
-| **7. prepare_tests** | AI agent reads `test_cases_planner.md` to plan acceptance tests |
-| **8. extract_tests** | Runs `test_extractor.ps1` to extract test configurations |
-| **9. deduplicate_tests** | Runs `deduplicate_tests.ps1` to remove duplicate tests |
-| **10. run_tests** | Executes `run-all-acctests.ps1` for acceptance testing |
-| **11. final_check** | Final verification + warns if `warning.md` exists |
+| **1. newres**         | Scaffolds initial AzAPI files via the external `newres` CLI |
+| **2. planning**       | Copilot session reads `plan.md`; produces `track.md` |
+| **3. tasks**          | For every actionable row in `track.md`: Executor session, then Checker session |
+| **4. validate**       | Asserts every row in `track.md` is `✅ Completed` (skipped when `-max-tasks` capped processing) |
+| **5. delete_main**    | Removes the original `main.tf` (AzureRM resource definition) |
+| **6. prepare_tests**  | Copilot session reads `test_cases_planner.md`; produces `test_cases.md` |
+| **7. extract_tests**  | One Copilot session per Pending row of `test_cases.md` (uses `expand_acc_test.md`) |
+| **8. dedup_tests**    | In-process MD5 dedup of `azurerm.tf + main.tf` per generated case |
+| **9. run_tests**      | One Copilot session per eligible row of `test_cases.md` (uses `terraform-test.md`) |
+| **10. final_check**   | Surfaces `warning.md` if it exists |
+
+### Subcommands
+
+The individual test stages are also exposed as subcommands so you can re-run
+just one slice of the pipeline without touching the checkpoint:
+
+```bash
+avm2azapi extract-tests -dir /path/to/module
+avm2azapi dedup-tests   -dir /path/to/module
+avm2azapi run-tests     -dir /path/to/module
+avm2azapi cleanup-rgs   -dry-run         # delete acctestRG-* older than 4 days
+```
 
 ### Checkpoint & Resume
 
-The script maintains progress in `.migrate-checkpoint.json`. If the process fails at any stage, simply re-run `./migrate.ps1` and it will resume from where it left off.
+Progress is stored in `.migrate-checkpoint.json` inside `-dir`. To resume
+after a failure, just re-run the same `avm2azapi` command. To start over,
+delete the file (and the generated artefacts you want gone) before re-running.
 
 ### What Could Be Wrong
 
-Even when `migrate.ps1` completes without errors, some issues may go undetected. Always verify the following:
+Even when `avm2azapi` reports success, some issues may go undetected. Always
+verify the following:
 
-#### Stage 4 Validation May Pass Incorrectly
+#### Validation only checks status, not correctness
 
-The validation stage checks if all tasks in `track.md` are marked ✅ Completed, but completion status doesn't guarantee correctness.
+The `validate` stage just confirms every row in `track.md` is `✅ Completed`.
+Completion does not guarantee the implementation is correct.
 
 **After migration ends, always verify:**
 
-1. Check `.migrate-checkpoint.json` to confirm all stages completed
-2. Review `track.md` to ensure all tasks show ✅ Completed status
-3. Spot-check proof documents in `proof/` folder for critical fields
+1. Confirm `.migrate-checkpoint.json` shows every stage true (or that the
+   file was removed — it is auto-deleted on a clean end-to-end run).
+2. Review `track.md` to ensure all tasks show `✅ Completed`.
+3. Spot-check proof documents in `proof/` for critical fields.
 
-#### Stage 10 Acceptance Tests May Fail
+#### Acceptance tests may fail
 
-After running acceptance tests, you **must** verify the results in `test_cases.md`:
+After `run_tests`, check the `test status` column in `test_cases.md`:
 
-1. **Check `test_cases.md`**: Review the `test status` column for each test case
-   - ✅ **Success** or **Skipped** - These are acceptable
-   - ❌ **Failed** - These require investigation and fixing
+1. **Check `test_cases.md`**: review the `test status` column for each case
+   - ✅ **Success** or **Skipped** — acceptable
+   - ❌ **Failed** — requires investigation
 
-2. **For failed tests**: Check the error log in the test folder:
+2. **For failed tests**: check the error log in the test folder:
+
    ```bash
-   # Error logs are saved as err.log in each test case folder
    cat tests/<test_case_name>/err.log
    ```
 
-3. **Fix all failures**: It is the user's responsibility to fix all failed tests before considering the migration complete. Common issues include:
+3. **Fix all failures**: it is the user's responsibility to fix all failed
+   tests before considering the migration complete. Common issues include:
    - Missing field mappings in `migrate_main.tf`
    - Incorrect validation rules in `migrate_variables.tf`
    - Missing default values
@@ -161,21 +204,22 @@ Each acceptance test validates both migration and green-field scenarios:
 7. **Compare states** - Verify nothing has changed between the before/after states
 8. **Destroy and re-apply** - Destroy the resources, then apply again to verify the green-field scenario works correctly
 
-#### Stage 11 Final Check Limitations
+#### Final-check limitations
 
-The final verification has known limitations:
+1. **Check for `warning.md`**: if this file exists, some tasks may not be
+   properly implemented. Review its contents carefully.
 
-1. **Check for `warning.md`**: If this file exists, some tasks may not be properly implemented. Review its contents carefully.
-
-2. **Timeouts are not fully verified**: The final check cannot verify whether `timeouts` have been implemented correctly. To verify manually:
+2. **Timeouts are not fully verified**: the final check cannot verify whether
+   `timeouts` have been implemented correctly. To verify manually:
    - Open `migrate_variables.tf`
    - Find `variable "timeouts"`
    - Verify the `default` block has correct values (e.g., `create = "30m"`, `delete = "30m"`)
    - If the defaults are set correctly, you can **ignore** any `timeouts` warnings in `warning.md`
 
-3. **For other warnings in `warning.md`**: Consult GitHub Copilot to investigate:
+3. **For other warnings in `warning.md`**: consult GitHub Copilot to investigate:
+
    ```bash
-   copilot -p "Read migrate.ps1 and warning.md to understand the context. Then verify whether the tasks listed in warning.md have been implemented correctly in the migrate_*.tf files. If not, identify what could be wrong." --allow-all-tools --model claude-sonnet-4.5
+   copilot -p "Read warning.md and the migrate_*.tf files. Verify whether the listed tasks have been implemented correctly. If not, identify what could be wrong." --allow-all-tools --model claude-sonnet-4.5
    ```
 
 ## Generated Files
@@ -195,58 +239,56 @@ After migration, your module will contain:
 
 ## File Reference
 
-### Core Scripts
+### Binary entrypoints
 
-| File | Purpose |
-|------|---------|
-| `migrate.ps1` | Main entrypoint - orchestrates the entire migration |
-| `run-coordinator.ps1` | Runs the coordinator agent for task delegation |
-| `test_extractor.ps1` | Extracts test configurations from provider tests |
-| `deduplicate_tests.ps1` | Removes duplicate test cases |
-| `run-all-acctests.ps1` | Executes all acceptance tests |
-| `cleanup-test-rgs.ps1` | Cleans up Azure resource groups from testing |
+| Command | Purpose |
+|---------|---------|
+| `avm2azapi -resource <type> -dir <path>` | Run the full migration pipeline (stages 1–10 above) |
+| `avm2azapi extract-tests -dir <path>`    | Re-run only the `extract_tests` stage |
+| `avm2azapi dedup-tests   -dir <path>`    | Re-run only the `dedup_tests` stage |
+| `avm2azapi run-tests     -dir <path>`    | Re-run only the `run_tests` stage |
+| `avm2azapi cleanup-rgs`                  | Delete `acctestRG-*` resource groups older than 4 days |
 
-### AI Agent Prompts
+### AI Agent Prompts (embedded in the binary, written to `-dir` on every run)
 
 | File | Agent Role |
 |------|------------|
-| `plan.md` | **Planner Agent** - Analyzes resource schema, creates `track.md` |
-| `coordinator.md` | **Coordinator Agent** - Delegates tasks to executors |
-| `executor.md` | **Executor Agent** - Implements individual field migrations |
-| `checker.md` | **Checker Agent** - Validates completed implementations |
-| `test_cases_planner.md` | **Test Planner** - Identifies test cases to extract |
-| `test_extractor.md` | **Test Extractor** - Extracts test configurations |
-| `expand_acc_test.md` | **Test Expander** - Expands test templates |
+| `plan.md`              | **Planner Agent** — analyzes resource schema, creates `track.md` |
+| `coordinator.md`       | **Coordinator Agent** — historical reference (Go orchestrator now does this) |
+| `executor.md`          | **Executor Agent** — implements individual field migrations |
+| `checker.md`           | **Checker Agent** — validates completed implementations |
+| `test_cases_planner.md`| **Test Planner** — identifies test cases to extract |
+| `test_extractor.md`    | **Test Extractor** — extracts test configurations |
+| `expand_acc_test.md`   | **Test Expander** — expands test templates |
+| `terraform-test.md`    | **Tester Agent** — runs an individual acceptance test |
 
 ### Override Documents
 
 | File | Purpose |
 |------|---------|
-| `diffsuppressfunc.md` | Rules for handling `DiffSuppressFunc` fields |
-| `timeouts.md` | Rules for handling timeout blocks |
-| `common_terraform_error.md` | Common error patterns and solutions |
-| `acceptable_drift_patterns.md` | Known acceptable drift patterns in tests |
-| `terraform-test.md` | Terraform test file guidelines |
+| `diffsuppressfunc.md`         | Rules for handling `DiffSuppressFunc` fields |
+| `timeouts.md`                 | Rules for handling timeout blocks |
+| `common_terraform_error.md`   | Common error patterns and solutions |
+| `acceptable_drift_patterns.md`| Known acceptable drift patterns in tests |
 
 ## Example Workflow
 
 ```bash
-# 1. Create a new AVM module directory
-mkdir my-azapi-vnet-module
-cd my-azapi-vnet-module
+# 1. Install the orchestrator (one-off).
+go install github.com/lonegunmanb/avm2azapi/cmd/avm2azapi@latest
 
-# 2. Initialize with minimal structure (keep main.telemetry.tf if from AVM template)
-# 3. Copy replicator files
-cp -r ~/avm-replicator-2-azapi/replicator/* .
+# 2. Create / clean a target AVM module directory (keep main.telemetry.tf).
+mkdir my-azapi-vnet-module && cd my-azapi-vnet-module
 
-# 4. Run migration for azurerm_virtual_network
-./migrate.ps1 azurerm_virtual_network
+# 3. Run the full pipeline.
+avm2azapi -resource azurerm_virtual_network -dir .
 
-# 5. Wait for completion - the script will:
-#    - Generate track.md with ~50-200 tasks depending on resource complexity
-#    - Create migrate_*.tf files with full azapi_resource implementation
-#    - Run acceptance tests to verify correctness
-#    - Generate proof documents for each field migration
+# avm2azapi will:
+#   - extract every embedded .md prompt into the working directory
+#   - generate track.md (typically 50–200 tasks)
+#   - run Executor + Checker per task
+#   - generate migrate_*.tf, proof/*.md
+#   - draft test_cases.md, extract & dedup tests, then run them
 ```
 
 ## Troubleshooting
@@ -256,21 +298,21 @@ cp -r ~/avm-replicator-2-azapi/replicator/* .
 If the migration fails mid-way:
 
 ```bash
-# Simply re-run - it will resume from the last checkpoint
-./migrate.ps1 azurerm_virtual_network
+# Just re-run — it will resume from the last checkpoint stage.
+avm2azapi -resource azurerm_virtual_network -dir .
 ```
 
 ### Reset and Start Over
 
 ```bash
-# Remove checkpoint to start fresh
+# Remove checkpoint to start fresh.
 rm .migrate-checkpoint.json
 
-# Or remove all generated files
+# Or remove all generated files.
 rm -f migrate_*.tf track.md test_cases.md
-rm -rf proof/ tests/
+rm -rf proof/ tests/ azurermacctest/
 
-./migrate.ps1 azurerm_virtual_network
+avm2azapi -resource azurerm_virtual_network -dir .
 ```
 
 ### Check Task Status
