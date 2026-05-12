@@ -283,9 +283,15 @@ func (m *Model) refreshOutputPane() {
 }
 
 func (m *Model) relayout() {
-	// header now occupies 2 lines (title + status), progress 1, footer 1.
-	header, progress, footer := 3, 1, 1
-	body := m.height - header - progress - footer
+	// Vertical budget:
+	//   1 line  title (resource type)
+	//   1 line  status (stage / counts / tokens)
+	//   2 lines pane border (top + bottom of the bordered list/output)
+	//   1 line  progress bar
+	//   1 line  footer / help
+	// Inner pane content height is therefore m.height - 6.
+	const chrome = 6
+	body := m.height - chrome
 	if body < 4 {
 		body = 4
 	}
